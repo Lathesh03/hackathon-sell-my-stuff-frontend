@@ -1,0 +1,71 @@
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write     # required for GitHub OIDC
+  contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  SITE_BUCKET: ${{ secrets.SITE_BUCKET }}
+  DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        run: terraform -chdir=terraform init -reconfigure
+
+      - name: Terraform Apply
+        run: terraform -chdir=terraform apply -auto-approve -var "site_bucket_name=${{ env.SITE_BUCKET }}"
+
+      - name: Use Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # Optional: set better cache headers for immutable assets
+      - name: Upload assets (hashed) with long cache
+        run: |
+          aws s3 sync dist s3://$SITE_BUCKET \
+            --delete \
+            --exclude "index.html" \
+            --cache-control "public,max-age=31536000,immutable"
+      - name: Upload index.html with short cache
+        run: |
+          aws s3 cp dist/index.html s3://$SITE_BUCKET/index.html \
+            --cache-control "no-cache"
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "$DISTRIBUTION_ID" \
+            --paths "/*"
+
+      - name: Show URL
+        run: terraform -chdir=terraform output -raw cloudfront_url || true
